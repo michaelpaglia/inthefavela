@@ -1,0 +1,15 @@
+{
+  "run_id": "run_20250310_113044",
+  "timestamp": "2025-03-10 11:30:44",
+  "forecast_rainfall": 25.0,
+  "forecast_coffee_price": null,
+  "config": {
+    "drought_threshold": 30,
+    "optimal_min": 60,
+    "optimal_max": 90,
+    "num_samples": 2000,
+    "tuning_steps": 1000,
+    "random_seed": 42,
+    "alpha_vantage_api_key": "G80Z51WM9FY5QSST"
+  }
+}
