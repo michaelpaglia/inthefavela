@@ -6,18 +6,22 @@ from typing import Tuple
 
 
 def get_brazil_weather_data(api_url: str = "http://localhost:8000",
-                            region: str = "Minas Gerais") -> Tuple[pd.DataFrame, pd.DataFrame]:
+                            region: str = "Minas Gerais",
+                            max_records_per_station: int = 365,  # Limit to ~1 year of daily data per station
+                            max_total_records: int = 5000) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Fetch weather data for Brazil coffee regions from the API.
 
     Args:
         api_url: Base URL for the Brazil Weather Data API
         region: Brazilian state to filter for (e.g., "Minas Gerais")
+        max_records_per_station: Maximum records to collect per station
+        max_total_records: Maximum total records to collect across all stations
 
     Returns:
         Tuple of (weather_data, annual_rainfall)
     """
-    print(f"Fetching Brazil weather data for {region} from API...")
+    print(f"Fetching Brazil weather data for {region} from API (with limits)...")
 
     # Define known Minas Gerais weather stations
     minas_stations = [
@@ -69,16 +73,26 @@ def get_brazil_weather_data(api_url: str = "http://localhost:8000",
             chunk_start = chunk_end + pd.Timedelta(days=1)
 
         print(
-            f"Fetching data in {len(date_chunks)} chunks from {start_date.strftime('%Y-%m-%dd')} to {end_date.strftime('%Y-%m-%dd')}")
+            f"Fetching data in {len(date_chunks)} chunks from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
 
         # Fetch data for each station and date chunk
         for station in minas_stations:
+            # Skip stations if we've collected too much data already
+            if len(all_weather_records) >= max_total_records:
+                print(f"Reached maximum total records ({max_total_records}). Stopping data collection.")
+                break
+
             station_id = station["IdStationWho"]
             print(f"Fetching data for station {station_id} ({station['StationName']})...")
 
             station_records = []
 
             for chunk_start, chunk_end in date_chunks:
+                # Break if we've collected enough records for this station
+                if len(station_records) >= max_records_per_station:
+                    print(f"  Reached maximum records for station {station_id}")
+                    break
+
                 try:
                     # Construct API URL
                     url = f"{api_url}/weather/{station_id}/{chunk_start}/{chunk_end}/"
@@ -91,34 +105,40 @@ def get_brazil_weather_data(api_url: str = "http://localhost:8000",
                         # Parse JSON response
                         data = response.json()
 
+                        # Sample data if there's too much
+                        if len(data) > 30:  # If more than 30 days in the chunk
+                            # Take every nth record to get approximately one record per day
+                            sampling_rate = max(1, len(data) // 30)
+                            data = data[::sampling_rate]
+
                         # Process each record
                         for record in data:
-                            # Convert date strings to datetime
-                            date = pd.to_datetime(record['Date'], format='ISO8601')
+                            # Stop if we've reached the per-station limit
+                            if len(station_records) >= max_records_per_station:
+                                break
 
-                            for record in data:
-                                # Handle ISO8601 date format with time component
-                                date_str = record['Date']
-                                if 'T' in date_str:
-                                    date_str = date_str.split('T')[0]  # Keep only the date part
+                            # Handle ISO8601 date format with time component
+                            date_str = record['Date']
+                            if 'T' in date_str:
+                                date_str = date_str.split('T')[0]  # Keep only the date part
 
-                                date = pd.to_datetime(date_str, format='%Y-%m-%d')
+                            date = pd.to_datetime(date_str, format='%Y-%m-%d')
 
-                                # Create weather record
-                                weather_record = {
-                                    'date': date,
-                                    'station': station_id,
-                                    'station_name': station["StationName"],
-                                    'latitude': station["Latitude"],
-                                    'longitude': station["Longitude"],
-                                    'state': region,
-                                    'precipitation': record.get('TotalPrecipitation', 0),  # in mm
-                                    'temperature': record.get('DryBulbTemperature', None),  # in °C
-                                    'altitude': station["Altitude"],
-                                    'relative_humidity': record.get('HourlyRelativeHumidity', None)  # in %
-                                }
+                            # Create weather record
+                            weather_record = {
+                                'date': date,
+                                'station': station_id,
+                                'station_name': station["StationName"],
+                                'latitude': station["Latitude"],
+                                'longitude': station["Longitude"],
+                                'state': region,
+                                'precipitation': record.get('TotalPrecipitation', 0),  # in mm
+                                'temperature': record.get('DryBulbTemperature', None),  # in °C
+                                'altitude': station["Altitude"],
+                                'relative_humidity': record.get('HourlyRelativeHumidity', None)  # in %
+                            }
 
-                                station_records.append(weather_record)
+                            station_records.append(weather_record)
                     else:
                         print(f"  Error fetching data: HTTP {response.status_code}")
                         print(f"  Response: {response.text}")
@@ -127,9 +147,24 @@ def get_brazil_weather_data(api_url: str = "http://localhost:8000",
                     print(f"  Error fetching data for {station_id} from {chunk_start} to {chunk_end}: {e}")
 
             print(f"  Collected {len(station_records)} records for station {station_id}")
+
+            # Add a random sample of station records if we need to limit further
+            if len(station_records) > max_records_per_station:
+                import random
+                random.seed(42)  # For reproducibility
+                station_records = random.sample(station_records, max_records_per_station)
+                print(f"  Sampled down to {len(station_records)} records")
+
             all_weather_records.extend(station_records)
 
         print(f"Total records collected: {len(all_weather_records)}")
+
+        # Sample from total records if we still have too many
+        if len(all_weather_records) > max_total_records:
+            import random
+            random.seed(42)  # For reproducibility
+            all_weather_records = random.sample(all_weather_records, max_total_records)
+            print(f"Sampled down to a total of {len(all_weather_records)} records")
 
         # If we couldn't get any data from the API, fall back to synthetic data
         if not all_weather_records:
@@ -544,14 +579,6 @@ def prepare_seasonal_features(weather_data: pd.DataFrame,
                               coffee_data: pd.DataFrame = None) -> pd.DataFrame:
     """
     Prepare seasonal features from weather data for the coffee harvest model.
-
-    Args:
-        weather_data: DataFrame with daily/monthly weather data, must include precipitation,
-                     temperature, and datetime information
-        coffee_data: Optional DataFrame with coffee price data
-
-    Returns:
-        DataFrame with seasonal features for the model
     """
     # Ensure we have date index
     if not isinstance(weather_data.index, pd.DatetimeIndex):
@@ -582,8 +609,9 @@ def prepare_seasonal_features(weather_data: pd.DataFrame,
     for season_name, months in seasons.items():
         # Rainfall totals
         season_data = weather_data[weather_data['month'].isin(months)]
-        rain_by_year = season_data.groupby('year')['precipitation'].sum()
-        features[f'{season_name}_rain'] = rain_by_year
+        if 'precipitation' in weather_data.columns:
+            rain_by_year = season_data.groupby('year')['precipitation'].sum()
+            features[f'{season_name}_rain'] = rain_by_year
 
         # Mean temperatures
         if 'temperature' in weather_data.columns:
@@ -600,26 +628,47 @@ def prepare_seasonal_features(weather_data: pd.DataFrame,
             max_temp_by_year = season_data.groupby('year')['max_temperature'].mean()
             features[f'{season_name}_max_temp'] = max_temp_by_year
 
-    # Calculate additional features from the paper
-    features['drought_late_grow'] = features['late_grow_rain'] < 1600  # mm, threshold from paper
-    features['high_harvest_rain'] = features['harvest_rain'] > 750  # mm, threshold from paper
-    features['high_harvest_temp'] = features['harvest_min_temp'] > 22  # °C, threshold from paper
+    # Calculate additional features from the paper - with column existence checks
+    if 'late_grow_rain' in features.columns:
+        features['drought_late_grow'] = features['late_grow_rain'] < 1600  # mm, threshold from paper
+    else:
+        print("Warning: 'late_grow_rain' column not available")
+        features['drought_late_grow'] = False
+
+    if 'harvest_rain' in features.columns:
+        features['high_harvest_rain'] = features['harvest_rain'] > 750  # mm, threshold from paper
+    else:
+        print("Warning: 'harvest_rain' column not available")
+        features['high_harvest_rain'] = False
+
+    if 'harvest_min_temp' in features.columns:
+        features['high_harvest_temp'] = features['harvest_min_temp'] > 22  # °C, threshold from paper
+    elif 'harvest_temp' in features.columns:
+        # Fallback to regular temperature if min_temperature isn't available
+        features['high_harvest_temp'] = features['harvest_temp'] > 25  # Using higher threshold for mean temp
+        print("Using 'harvest_temp' instead of 'harvest_min_temp'")
+    else:
+        print("Warning: No temperature data available for harvest season")
+        features['high_harvest_temp'] = False
 
     # Add coffee price data if available
     if coffee_data is not None:
-        # Assuming coffee_data has a date index and 'price' column
-        yearly_coffee_prices = coffee_data.resample('YE').mean()
-        yearly_coffee_prices.index = yearly_coffee_prices.index.year
+        try:
+            # Assuming coffee_data has a date index and 'price' column
+            yearly_coffee_prices = coffee_data.resample('YE').mean()
+            yearly_coffee_prices.index = yearly_coffee_prices.index.year
 
-        # Merge with features
-        if 'price' in coffee_data.columns:
-            features = pd.merge(
-                features,
-                yearly_coffee_prices['price'],
-                left_index=True,
-                right_index=True,
-                how='left'
-            )
+            # Merge with features
+            if 'price' in coffee_data.columns:
+                features = pd.merge(
+                    features,
+                    yearly_coffee_prices['price'],
+                    left_index=True,
+                    right_index=True,
+                    how='left'
+                )
+        except Exception as e:
+            print(f"Warning: Could not process coffee price data: {e}")
 
     return features
 
@@ -677,6 +726,9 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
     Build a Bayesian model for coffee harvest prediction incorporating
     seasonal climate effects on both yield quantity and quality.
 
+    This model includes both linear and quadratic terms for rainfall,
+    reflecting the non-linear relationship between rainfall and coffee yield.
+
     Args:
         features: DataFrame with seasonal climate features
         bean_quality_data: Optional DataFrame with bean quality metrics. If not provided,
@@ -688,8 +740,44 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
     import pymc as pm
     import numpy as np
 
-    # Clean input data
-    features_clean = features.dropna(subset=['late_grow_rain', 'yield_tons_per_hectare'])
+    # Check if features DataFrame is empty or very small
+    if features.empty:
+        raise ValueError("Features DataFrame is empty")
+
+    print(f"Features shape: {features.shape}")
+    print(f"Features columns: {features.columns.tolist()}")
+
+    # Show missing value counts for key columns
+    required_columns = ['late_grow_rain', 'yield_tons_per_hectare']
+    for col in required_columns:
+        if col in features.columns:
+            missing = features[col].isna().sum()
+            total = len(features)
+            print(f"Column '{col}' has {missing}/{total} missing values ({missing / total * 100:.1f}%)")
+        else:
+            print(f"Column '{col}' is not present in the dataset")
+
+    # Instead of dropping rows with NaN values, let's impute them
+    features_clean = features.copy()
+
+    # Impute missing values in required columns
+    for col in required_columns:
+        if col in features_clean.columns and features_clean[col].isna().any():
+            # Calculate mean of non-NaN values
+            col_mean = features_clean[col].mean()
+            if pd.isna(col_mean):  # If all values are NaN, use a reasonable default
+                if col == 'late_grow_rain':
+                    col_mean = 60.0  # Reasonable default rainfall in inches
+                elif col == 'yield_tons_per_hectare':
+                    col_mean = 1.8  # Reasonable default yield
+                else:
+                    col_mean = 0.0
+
+            # Fill NaN values with the mean
+            missing_count = features_clean[col].isna().sum()
+            if missing_count > 0:
+                print(f"Imputing {missing_count} missing values in '{col}' with mean: {col_mean:.2f}")
+                features_clean[col] = features_clean[col].fillna(col_mean)
 
     # Get available features
     has_quality_data = bean_quality_data is not None
@@ -705,62 +793,202 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
     else:
         model_data = features_clean
 
+    # Helper function for safe scaling
+    def safe_scale(values, name='unnamed', default_mean=0, default_std=1):
+        """Safely scale values, handling empty arrays and NaN values."""
+        if len(values) == 0:
+            print(f"Warning: Empty array for {name}, using zeros")
+            return np.zeros(1), default_mean, default_std
+
+        if np.isnan(values).all():
+            print(f"Warning: All NaN values for {name}, using zeros")
+            return np.zeros(len(values)), default_mean, default_std
+
+        # Replace NaN with mean to avoid propagation
+        clean_values = np.copy(values)
+        if np.isnan(values).any():
+            mean_val = np.nanmean(values)
+            clean_values[np.isnan(clean_values)] = mean_val
+            print(f"Warning: {np.isnan(values).sum()} NaN values in {name} replaced with mean ({mean_val:.2f})")
+
+        mean_val = np.mean(clean_values)
+        std_val = np.std(clean_values)
+
+        # Ensure std is not zero to prevent division by zero
+        if std_val < 1e-10:
+            print(f"Warning: Near-zero standard deviation ({std_val}) for {name}, using default std={default_std}")
+            std_val = default_std
+
+        scaled_values = (clean_values - mean_val) / std_val
+        return scaled_values, mean_val, std_val
+
+    # Create empty scaling params dictionary
+    scaling_params = {}
+
     # Extract and scale climate variables by season
     # Flowering period (Jan-Feb)
-    X_flower_rain = model_data['flower_rain'].values
-    flower_rain_mean, flower_rain_std = np.mean(X_flower_rain), max(np.std(X_flower_rain), 1.0)
-    X_flower_rain_scaled = (X_flower_rain - flower_rain_mean) / flower_rain_std
+    if 'flower_rain' in model_data.columns:
+        X_flower_rain = model_data['flower_rain'].values
+        X_flower_rain_scaled, flower_rain_mean, flower_rain_std = safe_scale(
+            X_flower_rain, name='flower_rain')
+        scaling_params.update({
+            'flower_rain_mean': flower_rain_mean,
+            'flower_rain_std': flower_rain_std
+        })
+    else:
+        # Use a placeholder array with the same length as the dataset
+        X_flower_rain = np.zeros(len(model_data))
+        X_flower_rain_scaled = X_flower_rain
+        flower_rain_mean, flower_rain_std = 0, 1
+        scaling_params.update({
+            'flower_rain_mean': flower_rain_mean,
+            'flower_rain_std': flower_rain_std
+        })
 
     if 'flower_temp' in model_data.columns:
         X_flower_temp = model_data['flower_temp'].values
-        flower_temp_mean, flower_temp_std = np.mean(X_flower_temp), max(np.std(X_flower_temp), 1.0)
-        X_flower_temp_scaled = (X_flower_temp - flower_temp_mean) / flower_temp_std
+        X_flower_temp_scaled, flower_temp_mean, flower_temp_std = safe_scale(
+            X_flower_temp, name='flower_temp')
+        scaling_params.update({
+            'flower_temp_mean': flower_temp_mean,
+            'flower_temp_std': flower_temp_std
+        })
     else:
-        X_flower_temp_scaled = np.zeros_like(X_flower_rain)
+        X_flower_temp_scaled = np.zeros(len(model_data))
         flower_temp_mean, flower_temp_std = 0, 1
+        scaling_params.update({
+            'flower_temp_mean': flower_temp_mean,
+            'flower_temp_std': flower_temp_std
+        })
+
+    # Early growing season (Mar-Jun)
+    if 'early_grow_rain' in model_data.columns:
+        X_early_grow_rain = model_data['early_grow_rain'].values
+        X_early_grow_rain_scaled, early_grow_rain_mean, early_grow_rain_std = safe_scale(
+            X_early_grow_rain, name='early_grow_rain')
+        scaling_params.update({
+            'early_grow_rain_mean': early_grow_rain_mean,
+            'early_grow_rain_std': early_grow_rain_std
+        })
+    else:
+        X_early_grow_rain_scaled = np.zeros(len(model_data))
+        early_grow_rain_mean, early_grow_rain_std = 0, 1
+        scaling_params.update({
+            'early_grow_rain_mean': early_grow_rain_mean,
+            'early_grow_rain_std': early_grow_rain_std
+        })
 
     # Late growing season (Jul-Sep)
     X_late_grow_rain = model_data['late_grow_rain'].values
-    late_grow_rain_mean, late_grow_rain_std = np.mean(X_late_grow_rain), max(np.std(X_late_grow_rain), 1.0)
-    X_late_grow_rain_scaled = (X_late_grow_rain - late_grow_rain_mean) / late_grow_rain_std
+    X_late_grow_rain_scaled, late_grow_rain_mean, late_grow_rain_std = safe_scale(
+        X_late_grow_rain, name='late_grow_rain')
+    scaling_params.update({
+        'late_grow_rain_mean': late_grow_rain_mean,
+        'late_grow_rain_std': late_grow_rain_std
+    })
+
+    # Create scaled quadratic term for late_grow_rain
+    # Center at 75 inches (optimal range midpoint) to improve interpretability
+    X_late_grow_rain_quad = (X_late_grow_rain - 75) ** 2
+    X_late_grow_rain_quad_scaled, late_grow_rain_quad_mean, late_grow_rain_quad_std = safe_scale(
+        X_late_grow_rain_quad, name='late_grow_rain_quad')
+    scaling_params.update({
+        'late_grow_rain_quad_mean': late_grow_rain_quad_mean,
+        'late_grow_rain_quad_std': late_grow_rain_quad_std
+    })
 
     if 'late_grow_temp' in model_data.columns:
         X_late_grow_temp = model_data['late_grow_temp'].values
-        late_grow_temp_mean, late_grow_temp_std = np.mean(X_late_grow_temp), max(np.std(X_late_grow_temp), 1.0)
-        X_late_grow_temp_scaled = (X_late_grow_temp - late_grow_temp_mean) / late_grow_temp_std
+        X_late_grow_temp_scaled, late_grow_temp_mean, late_grow_temp_std = safe_scale(
+            X_late_grow_temp, name='late_grow_temp')
+        scaling_params.update({
+            'late_grow_temp_mean': late_grow_temp_mean,
+            'late_grow_temp_std': late_grow_temp_std
+        })
     else:
-        X_late_grow_temp_scaled = np.zeros_like(X_flower_rain)
+        X_late_grow_temp_scaled = np.zeros(len(model_data))
         late_grow_temp_mean, late_grow_temp_std = 0, 1
+        scaling_params.update({
+            'late_grow_temp_mean': late_grow_temp_mean,
+            'late_grow_temp_std': late_grow_temp_std
+        })
 
     # Harvest season (Oct-Dec)
     if 'harvest_rain' in model_data.columns:
         X_harvest_rain = model_data['harvest_rain'].values
-        harvest_rain_mean, harvest_rain_std = np.mean(X_harvest_rain), max(np.std(X_harvest_rain), 1.0)
-        X_harvest_rain_scaled = (X_harvest_rain - harvest_rain_mean) / harvest_rain_std
+        X_harvest_rain_scaled, harvest_rain_mean, harvest_rain_std = safe_scale(
+            X_harvest_rain, name='harvest_rain')
+        scaling_params.update({
+            'harvest_rain_mean': harvest_rain_mean,
+            'harvest_rain_std': harvest_rain_std
+        })
     else:
-        X_harvest_rain_scaled = np.zeros_like(X_flower_rain)
+        X_harvest_rain_scaled = np.zeros(len(model_data))
         harvest_rain_mean, harvest_rain_std = 0, 1
+        scaling_params.update({
+            'harvest_rain_mean': harvest_rain_mean,
+            'harvest_rain_std': harvest_rain_std
+        })
 
-    if 'harvest_min_temp' in model_data.columns:
-        X_harvest_min_temp = model_data['harvest_min_temp'].values
-        harvest_min_temp_mean = np.mean(X_harvest_min_temp)
-        harvest_min_temp_std = max(np.std(X_harvest_min_temp), 1.0)
-        X_harvest_min_temp_scaled = (X_harvest_min_temp - harvest_min_temp_mean) / harvest_min_temp_std
+    # Use harvest_temp if available, otherwise try harvest_min_temp
+    if 'harvest_temp' in model_data.columns:
+        harvest_temp_col = 'harvest_temp'
+    elif 'harvest_min_temp' in model_data.columns:
+        harvest_temp_col = 'harvest_min_temp'
     else:
-        X_harvest_min_temp_scaled = np.zeros_like(X_flower_rain)
-        harvest_min_temp_mean, harvest_min_temp_std = 0, 1
+        harvest_temp_col = None
+
+    if harvest_temp_col:
+        X_harvest_temp = model_data[harvest_temp_col].values
+        X_harvest_temp_scaled, harvest_temp_mean, harvest_temp_std = safe_scale(
+            X_harvest_temp, name=harvest_temp_col)
+        scaling_params.update({
+            'harvest_temp_mean': harvest_temp_mean,
+            'harvest_temp_std': harvest_temp_std
+        })
+    else:
+        X_harvest_temp_scaled = np.zeros(len(model_data))
+        harvest_temp_mean, harvest_temp_std = 0, 1
+        scaling_params.update({
+            'harvest_temp_mean': harvest_temp_mean,
+            'harvest_temp_std': harvest_temp_std
+        })
 
     # Target variables
     y_yield = model_data['yield_tons_per_hectare'].values
 
+    # Ensure no NaN in target variable (should already be handled by imputation above)
+    if np.isnan(y_yield).any():
+        print(f"Warning: {np.isnan(y_yield).sum()} NaN values in yield, replacing with mean")
+        mean_yield = np.nanmean(y_yield)
+        if np.isnan(mean_yield):
+            mean_yield = 1.8  # Default if all values are NaN
+        y_yield = np.where(np.isnan(y_yield), mean_yield, y_yield)
+
     if has_quality_data:
         if 'bean_size_score' in model_data.columns:
             y_bean_size = model_data['bean_size_score'].values
+            # Check for NaN values
+            if np.isnan(y_bean_size).any():
+                print(f"Warning: {np.isnan(y_bean_size).sum()} NaN values in bean_size_score, replacing with mean")
+                mean_size = np.nanmean(y_bean_size)
+                if np.isnan(mean_size):
+                    mean_size = 0.0  # Default if all values are NaN
+                y_bean_size = np.where(np.isnan(y_bean_size), mean_size, y_bean_size)
+            has_bean_size = True
         else:
             has_bean_size = False
 
         if 'bean_defect_score' in model_data.columns:
             y_bean_defects = model_data['bean_defect_score'].values
+            # Check for NaN values
+            if np.isnan(y_bean_defects).any():
+                print(f"Warning: {np.isnan(y_bean_defects).sum()} NaN values in bean_defect_score, replacing with mean")
+                mean_defects = np.nanmean(y_bean_defects)
+                if np.isnan(mean_defects):
+                    mean_defects = 0.0  # Default if all values are NaN
+                y_bean_defects = np.where(np.isnan(y_bean_defects), mean_defects, y_bean_defects)
+            has_bean_defects = True
         else:
             has_bean_defects = False
     else:
@@ -772,6 +1000,9 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
         # Yield quantity priors
         beta_yield_intercept = pm.Normal('yield_intercept', mu=1.5, sigma=1.0)
         beta_yield_late_rain = pm.Normal('yield_late_rain', mu=0.4, sigma=0.2)
+
+        # Add quadratic term for rainfall
+        beta_rainfall_quad = pm.Normal('rainfall_quad', mu=-0.2, sigma=0.1)  # Negative prior for concave relationship
 
         # Optional predictors for yield
         if 'flower_rain' in model_data.columns:
@@ -795,6 +1026,10 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
             # Interaction term for harvest rain + temp
             beta_defect_interaction = pm.Normal('defect_rain_temp_interaction', mu=0.2, sigma=0.1)
 
+        # Add a drought penalty term (if rainfall is below threshold)
+        # This could be modeled as a step function but we'll use a separate parameter
+        drought_penalty = pm.Normal('drought_penalty', mu=-0.5, sigma=0.2)  # Negative impact on yield
+
         # Model error terms
         sigma_yield = pm.HalfNormal('sigma_yield', sigma=0.5)
 
@@ -804,12 +1039,21 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
         if has_bean_defects:
             sigma_defect = pm.HalfNormal('sigma_defect', sigma=0.5)
 
-        # Expected yield
-        mu_yield = beta_yield_intercept + beta_yield_late_rain * X_late_grow_rain_scaled
+        # Expected yield - now with quadratic term
+        mu_yield = (beta_yield_intercept +
+                    beta_yield_late_rain * X_late_grow_rain_scaled +
+                    beta_rainfall_quad * X_late_grow_rain_quad_scaled)
 
         # Add optional predictors if available
         if 'flower_rain' in model_data.columns:
             mu_yield += beta_yield_flower_rain * X_flower_rain_scaled
+
+        if 'early_grow_rain' in model_data.columns:
+            mu_yield += beta_yield_early_rain * X_early_grow_rain_scaled
+
+        # Add drought effect for rainfall below threshold
+        is_drought = pm.math.switch(X_late_grow_rain < 30, 1, 0)  # Binary indicator for drought
+        mu_yield += drought_penalty * is_drought
 
         # Expected bean size score (higher = more large beans)
         if has_bean_size:
@@ -821,8 +1065,8 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
         if has_bean_defects:
             mu_defect = (beta_defect_intercept +
                          beta_defect_harvest_rain * X_harvest_rain_scaled +
-                         beta_defect_harvest_temp * X_harvest_min_temp_scaled +
-                         beta_defect_interaction * X_harvest_rain_scaled * X_harvest_min_temp_scaled)
+                         beta_defect_harvest_temp * X_harvest_temp_scaled +
+                         beta_defect_interaction * X_harvest_rain_scaled * X_harvest_temp_scaled)
 
         # Likelihood functions
         yield_obs = pm.Normal('yield_obs', mu=mu_yield, sigma=sigma_yield, observed=y_yield)
@@ -837,20 +1081,7 @@ def build_mcmc_model(features: pd.DataFrame, bean_quality_data: pd.DataFrame = N
         trace = pm.sample(draws=1000, tune=1000, return_inferencedata=True, random_seed=42)
 
     # Store scaling parameters in the model for prediction
-    coffee_model.scaling_params = {
-        'flower_rain_mean': flower_rain_mean,
-        'flower_rain_std': flower_rain_std,
-        'flower_temp_mean': flower_temp_mean,
-        'flower_temp_std': flower_temp_std,
-        'late_grow_rain_mean': late_grow_rain_mean,
-        'late_grow_rain_std': late_grow_rain_std,
-        'late_grow_temp_mean': late_grow_temp_mean,
-        'late_grow_temp_std': late_grow_temp_std,
-        'harvest_rain_mean': harvest_rain_mean,
-        'harvest_rain_std': harvest_rain_std,
-        'harvest_min_temp_mean': harvest_min_temp_mean,
-        'harvest_min_temp_std': harvest_min_temp_std
-    }
+    coffee_model.scaling_params = scaling_params
 
     # Store flags for available quality metrics
     coffee_model.has_bean_size = has_bean_size

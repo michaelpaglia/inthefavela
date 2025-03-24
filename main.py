@@ -41,7 +41,7 @@ def main():
         result = tester.run_prediction(args.rainfall)
 
         # Plot results
-        #tester.plot_results()
+        tester.plot_results()
 
         # Calculate financial impact
         tester.calculate_financial_impact(args.rainfall, args.farm_size)
